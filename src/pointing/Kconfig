@@ -1,0 +1,8 @@
+if ZMK_POINTING
+
+config ZMK_ACCEL_CURVE
+    bool "Axis clamper"
+    default y
+    depends on INPUT
+
+endif

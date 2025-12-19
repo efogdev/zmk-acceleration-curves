@@ -1,0 +1,11 @@
+description: Input processor for acceleration curves
+compatible: "zmk,accel-curve"
+include: ip_zero_param.yaml
+
+properties:
+  max-curves:
+    type: int
+    required: true
+  points:
+    type: int
+    required: true
