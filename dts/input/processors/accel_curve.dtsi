@@ -1,8 +1,21 @@
+#include <dt-bindings/input/input-event-codes.h>
+
 / {
-    zip_accel_curve: zip_accel_curve {
+    zip_pointer_accel: zip_pointer_accel {
         compatible = "zmk,accel-curve";
         #input-processor-cells = <0>;
-        max-curves = <8>;
-        points = <64>;
+        max-curves = <4>;
+        points = <36>;
+        device-name = "pointer";
+        event-codes = <INPUT_REL_X INPUT_REL_Y>;
+    };
+
+    zip_scroll_accel: zip_scroll_accel {
+        compatible = "zmk,accel-curve";
+        #input-processor-cells = <0>;
+        max-curves = <4>;
+        points = <24>;
+        device-name = "scroll";
+        event-codes = <INPUT_REL_WHEEL INPUT_REL_HWHEEL>;
     };
 };

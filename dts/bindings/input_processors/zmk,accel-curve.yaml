@@ -9,3 +9,9 @@ properties:
   points:
     type: int
     required: true
+  device-name:
+    type: string
+    required: true
+  event-codes:
+    required: true
+    type: array

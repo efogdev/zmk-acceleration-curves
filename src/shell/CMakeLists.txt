@@ -1,0 +1,1 @@
+target_sources_ifdef(CONFIG_ZMK_ACCEL_CURVE_SHELL app PRIVATE accel_curve_shell.c)

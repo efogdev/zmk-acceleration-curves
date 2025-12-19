@@ -1,0 +1,7 @@
+if SHELL
+
+config ZMK_ACCEL_CURVE_SHELL
+bool "Acceleration curve shell commands"
+default y
+
+endif
