@@ -15,6 +15,9 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 static const struct device* devices[DT_NUM_INST_STATUS_OKAY(DT_DRV_COMPAT)];
 static uint8_t num_dev = 0;
 
+static struct k_work_delayable load_curves_work;
+static bool work_initialized = false;
+
 static int16_t bezier_eval(const int16_t p0, const int16_t p1, const int16_t p2, const int16_t p3, const float t) {
     const float u = 1.0f - t;
     const float tt = t * t;
@@ -42,12 +45,21 @@ static int set_curves(const struct device* dev, const char* datastring) {
 
         if (parsed != 8) break;
 
-        data->curves[curve_count] = (struct curve){
-            .start = {values[0], values[1]},
-            .end = {values[2], values[3]},
-            .cp1 = {values[4], values[5]},
-            .cp2 = {values[6], values[7]}
-        };
+        if (curve_count == 0) {
+            data->curves[curve_count] = (struct curve){
+                .start = {0, 10},
+                .end = {values[2], values[3]},
+                .cp1 = {values[4], values[5]},
+                .cp2 = {values[6], values[7]}
+            };
+        } else {
+            data->curves[curve_count] = (struct curve){
+                .start = {values[0], values[1]},
+                .end = {values[2], values[3]},
+                .cp1 = {values[4], values[5]},
+                .cp2 = {values[6], values[7]}
+            };
+        }
 
         curve_count++;
 
@@ -115,16 +127,10 @@ static int save_curves_to_nvs(const struct device* dev, const char* datastring) 
 
 static int load_cb(const char *key, const size_t len, const settings_read_cb read_cb, void *cb_arg, void *param) {
     const struct device* dev = param;
-    const struct zip_accel_curve_config *config = dev->config;
-    const char *next;
-    if (!settings_name_steq(key, config->device_name, &next)) {
-        return 0;
-    }
-
-    const char* data;
-    const int err = read_cb(cb_arg, &data, len);
-    if (err != 0) {
-        LOG_ERR("Failed to read curve!");
+    char data[len];
+    const int read = read_cb(cb_arg, &data, len);
+    if (read == 0) {
+        LOG_ERR("Failed to read curve: no data read");
         return -EACCES;
     }
 
@@ -132,9 +138,21 @@ static int load_cb(const char *key, const size_t len, const settings_read_cb rea
 }
 
 static int load_curves_from_nvs(const struct device* dev) {
-    char setting_name[16];
-    sprintf(setting_name, "%s", ACCEL_CURVE_NVS_PREFIX);
+    const struct zip_accel_curve_config *config = dev->config;
+    char setting_name[32];
+    sprintf(setting_name, "%s/%s", ACCEL_CURVE_NVS_PREFIX, config->device_name);
     return settings_load_subtree_direct(setting_name, load_cb, (struct device*) dev);
+}
+
+static void load_curves_work_handler(struct k_work *work) {
+    LOG_INF("Loading curves from NVS for all %d devices", num_dev);
+    
+    for (uint8_t i = 0; i < num_dev; i++) {
+        if (devices[i] != NULL) {
+            const struct zip_accel_curve_config *config = devices[i]->config;
+            load_curves_from_nvs(devices[i]);
+        }
+    }
 }
 
 static int dump_cb(const char *key, const size_t len, const settings_read_cb read_cb, void *cb_arg, void *param) {
@@ -211,6 +229,8 @@ int data_import(const struct device* dev, const char* datastring) {
     }
 
     const int curve_count = set_curves(dev, datastring);
+    LOG_INF("%d curves found", curve_count);
+
     if (curve_count > 0) {
         data->initialized = true;
         data->num_curves = curve_count;
@@ -231,7 +251,7 @@ int data_import(const struct device* dev, const char* datastring) {
 // ReSharper disable once CppParameterMayBeConstPtrOrRef
 static int sy_handle_event(const struct device *dev, struct input_event *event, const uint32_t p1,
                            const uint32_t p2, struct zmk_input_processor_state *s) {
-    struct zip_accel_curve_data *data = dev->data;
+    const struct zip_accel_curve_data *data = dev->data;
     const struct zip_accel_curve_config *config = dev->config;
 
     if (!data->initialized) {
@@ -280,6 +300,8 @@ static int sy_handle_event(const struct device *dev, struct input_event *event, 
         coef = interpolated_y / 100.0f;
     }
 
+    LOG_DBG("event value: %d, resulting coef: %.02f", input_val, coef);
+
     const float result_with_remainder = (float) abs_input * coef + data->remainders[event_idx];
     const int32_t result_int = (int32_t) result_with_remainder;
     data->remainders[event_idx] = result_with_remainder - (float) result_int;
@@ -316,7 +338,13 @@ static int sy_init(const struct device *dev) {
         return -EINVAL;
     }
     
-    load_curves_from_nvs(dev);
+    if (!work_initialized) {
+        k_work_init_delayable(&load_curves_work, load_curves_work_handler);
+        work_initialized = true;
+    }
+    
+    k_work_cancel_delayable(&load_curves_work);
+    k_work_reschedule(&load_curves_work, K_MSEC(1350));
     return 0;
 }
 
