@@ -195,6 +195,15 @@ int data_import(const struct device* dev, const char* datastring) {
 
     data->curves = malloc(sizeof(struct curve) * config->max_curves);
     data->points = malloc(sizeof(struct point) * config->points);
+    
+    if (!data->remainders) {
+        data->remainders = malloc(sizeof(float) * config->event_codes_len);
+        if (data->remainders) {
+            for (uint8_t i = 0; i < config->event_codes_len; i++) {
+                data->remainders[i] = 0.0f;
+            }
+        }
+    }
 
     if (!data->curves || !data->points) {
         LOG_ERR("Failed to allocate memory for curves or points");
@@ -222,17 +231,19 @@ int data_import(const struct device* dev, const char* datastring) {
 // ReSharper disable once CppParameterMayBeConstPtrOrRef
 static int sy_handle_event(const struct device *dev, struct input_event *event, const uint32_t p1,
                            const uint32_t p2, struct zmk_input_processor_state *s) {
-    const struct zip_accel_curve_data *data = dev->data;
+    struct zip_accel_curve_data *data = dev->data;
     const struct zip_accel_curve_config *config = dev->config;
 
     if (!data->initialized) {
         return 0;
     }
 
+    uint8_t event_idx = 0;
     bool relevant = false;
     for (uint8_t i = 0; i < config->event_codes_len; i++) {
         if (event->code == config->event_codes[i]) {
             relevant = true;
+            event_idx = i;
             break;
         }
     }
@@ -245,36 +256,35 @@ static int sy_handle_event(const struct device *dev, struct input_event *event, 
     const int32_t abs_input = abs(input_val);
     const int32_t sign = (input_val >= 0) ? 1 : -1;
 
-    if (config->points == 0 || !data->points) {
+    if (config->points == 0 || !data->points || !data->remainders) {
         return 0;
     }
 
+    float coef;
     if (abs_input >= data->points[config->points - 1].x) {
-        const float coef = data->points[config->points - 1].y / 100.0f;
-        event->value = (int32_t)(abs_input * coef) * sign;
-        return 0;
-    }
-
-    if (abs_input <= data->points[0].x) {
-        const float coef = data->points[0].y / 100.0f;
-        event->value = (int32_t)(abs_input * coef) * sign;
-        return 0;
-    }
-
-    uint32_t i = 0;
-    for (i = 0; i < config->points - 1; i++) {
-        if (abs_input >= data->points[i].x && abs_input < data->points[i + 1].x) {
-            break;
+        coef = data->points[config->points - 1].y / 100.0f;
+    } else if (abs_input <= data->points[0].x) {
+        coef = data->points[0].y / 100.0f;
+    } else {
+        uint32_t i = 0;
+        for (i = 0; i < config->points - 1; i++) {
+            if (abs_input >= data->points[i].x && abs_input < data->points[i + 1].x) {
+                break;
+            }
         }
+
+        const struct point *point0 = &data->points[i];
+        const struct point *point1 = &data->points[i + 1];
+        const float t = (float) (abs_input - point0->x) / (float) (point1->x - point0->x);
+        const float interpolated_y = point0->y + t * (point1->y - point0->y);
+        coef = interpolated_y / 100.0f;
     }
 
-    const struct point *point0 = &data->points[i];
-    const struct point *point1 = &data->points[i + 1];
-    const float t = (float) (abs_input - point0->x) / (float) (point1->x - point0->x);
-    const float interpolated_y = point0->y + t * (point1->y - point0->y);
-    const float coef = interpolated_y / 100.0f;
+    const float result_with_remainder = (float) abs_input * coef + data->remainders[event_idx];
+    const int32_t result_int = (int32_t) result_with_remainder;
+    data->remainders[event_idx] = result_with_remainder - (float) result_int;
 
-    event->value = (int32_t) ((float) abs_input * coef) * sign;
+    event->value = result_int * sign;
     return 0;
 }
 

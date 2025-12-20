@@ -25,6 +25,7 @@ struct zip_accel_curve_data {
     struct point* points;
     uint8_t num_curves;
     char* stored_datastring;
+    float* remainders;  
 };
 
 void curves_init();
