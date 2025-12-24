@@ -102,6 +102,11 @@ static int cmd_set(const struct shell *sh, const size_t argc, char **argv) {
 
     const int ret = data_import(dev, datastring);
     free(datastring);
+
+    if (ret == 0) {
+        shprint(sh, "Done!");
+    }
+    
     return ret;
 }
 

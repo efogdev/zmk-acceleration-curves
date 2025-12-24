@@ -121,7 +121,7 @@ static int save_curves_to_nvs(const struct device* dev, const char* datastring) 
         return rc;
     }
     
-    LOG_INF("Saved curves to NVS for %s", config->device_name);
+    LOG_DBG("Saved curves to NVS for %s", config->device_name);
     return 0;
 }
 
