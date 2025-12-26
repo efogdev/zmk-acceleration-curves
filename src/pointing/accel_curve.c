@@ -99,7 +99,7 @@ static int set_curves(const struct device* dev, const char* datastring) {
     }
 
     for (uint32_t i = 1; i < point_idx; i++) {
-        if (data->points[i].x <= data->points[i-1].x && !(points_per_curve % i == 0 && data->points[i].x == data->points[i-1].x)) {
+        if (data->points[i].x < data->points[i-1].x && !(points_per_curve % i == 0 && data->points[i].x == data->points[i-1].x)) {
             LOG_ERR("now: %d prev: %d per: %d", (int)(data->points[i].x * 1000), (int)(data->points[i-1].x * 1000), points_per_curve);
             LOG_ERR("Invalid point sequence: X values must be strictly increasing at index %d/%d", i, point_idx);
             return -EINVAL;
