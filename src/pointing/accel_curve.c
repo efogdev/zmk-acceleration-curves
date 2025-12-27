@@ -149,7 +149,6 @@ static void load_curves_work_handler(struct k_work *work) {
     
     for (uint8_t i = 0; i < num_dev; i++) {
         if (devices[i] != NULL) {
-            const struct zip_accel_curve_config *config = devices[i]->config;
             load_curves_from_nvs(devices[i]);
         }
     }
