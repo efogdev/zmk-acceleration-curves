@@ -273,38 +273,36 @@ static int sy_handle_event(const struct device *dev, struct input_event *event, 
 
     const int32_t input_val = event->value;
     const int32_t abs_input = abs(input_val);
+    const int32_t abs_input_mult = abs_input * 100;
     const int32_t sign = (input_val >= 0) ? 1 : -1;
 
     if (config->points == 0 || !data->points || !data->remainders) {
         return 0;
     }
 
-    float coef;
-    if (abs_input >= data->points[config->points - 1].x) {
+    float coef = 1.0f;
+    if (abs_input_mult >= data->points[config->points - 1].x) {
         coef = data->points[config->points - 1].y / 100.0f;
-    } else if (abs_input <= data->points[0].x) {
+    } else if (abs_input_mult <= data->points[0].x) {
         coef = data->points[0].y / 100.0f;
     } else {
         uint32_t i = 0;
         for (i = 0; i < config->points - 1; i++) {
-            if (abs_input >= data->points[i].x && abs_input < data->points[i + 1].x) {
+            const struct point *point0 = &data->points[i];
+            const struct point *point1 = &data->points[i + 1];
+            const float t = (float) (abs_input_mult - point0->x) / (float) (point1->x - point0->x);
+            const float interpolated_y = point0->y + t * (point1->y - point0->y);
+            coef = interpolated_y / 100.0f;
+
+            if (abs_input_mult >= data->points[i].x && abs_input_mult < data->points[i + 1].x) {
                 break;
             }
         }
-
-        const struct point *point0 = &data->points[i];
-        const struct point *point1 = &data->points[i + 1];
-        const float t = (float) (abs_input - point0->x) / (float) (point1->x - point0->x);
-        const float interpolated_y = point0->y + t * (point1->y - point0->y);
-        coef = interpolated_y / 100.0f;
     }
-
-    LOG_DBG("event value: %d, resulting coef: %.02f", input_val, coef);
 
     const float result_with_remainder = (float) abs_input * coef + data->remainders[event_idx];
     const int32_t result_int = (int32_t) result_with_remainder;
     data->remainders[event_idx] = result_with_remainder - (float) result_int;
-
     event->value = result_int * sign;
     return 0;
 }
