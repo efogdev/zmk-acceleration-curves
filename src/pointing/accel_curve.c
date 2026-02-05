@@ -92,15 +92,21 @@ static int set_curves(const struct device* dev, const char* datastring) {
 
         for (uint32_t i = 0; i < num_points && point_idx < config->points; i++) {
             const float t = (float) i / (float) (num_points - 1);
-            data->points[point_idx].x = bezier_eval(c->start.x, c->cp1.x, c->cp2.x, c->end.x, t);
-            data->points[point_idx].y = bezier_eval(c->start.y, c->cp1.y, c->cp2.y, c->end.y, t);
+            const int16_t x = bezier_eval(c->start.x, c->cp1.x, c->cp2.x, c->end.x, t);
+            const int16_t y = bezier_eval(c->start.y, c->cp1.y, c->cp2.y, c->end.y, t);
+            
+            if (x < 100) {
+                continue;
+            }
+            
+            data->points[point_idx].x = x;
+            data->points[point_idx].y = y;
             point_idx++;
         }
     }
 
     for (uint32_t i = 1; i < point_idx; i++) {
         if (data->points[i].x < data->points[i-1].x && !(points_per_curve % i == 0 && data->points[i].x == data->points[i-1].x)) {
-            LOG_ERR("now: %d prev: %d per: %d", (int)(data->points[i].x * 1000), (int)(data->points[i-1].x * 1000), points_per_curve);
             LOG_ERR("Invalid point sequence: X values must be strictly increasing at index %d/%d", i, point_idx);
             return -EINVAL;
         }
@@ -253,7 +259,7 @@ static int sy_handle_event(const struct device *dev, struct input_event *event, 
     const struct zip_accel_curve_data *data = dev->data;
     const struct zip_accel_curve_config *config = dev->config;
 
-    if (!data->initialized) {
+    if (unlikely(!data->initialized)) {
         return 0;
     }
 
