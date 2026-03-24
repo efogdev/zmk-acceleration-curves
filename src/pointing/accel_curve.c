@@ -279,7 +279,7 @@ static int sy_handle_event(const struct device *dev, struct input_event *event, 
 
     const int32_t input_val = event->value;
     const int32_t abs_input = abs(input_val);
-    const int32_t abs_input_mult = abs_input * 100;
+    const int64_t abs_input_mult = (int64_t)abs_input * 100;
     const int32_t sign = (input_val >= 0) ? 1 : -1;
 
     if (config->points == 0 || !data->points || !data->remainders) {
@@ -381,6 +381,14 @@ int list_devices(char*** names) {
 
         const struct zip_accel_curve_config *config = devices[i]->config;
         collected[i] = strdup(config->device_name);
+        if (collected[i] == NULL) {
+            for (uint8_t j = 0; j < i; j++) {
+                free(collected[j]);
+            }
+            free(collected);
+            *names = NULL;
+            return -ENOMEM;
+        }
     }
 
     *names = collected;
