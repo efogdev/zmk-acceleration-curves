@@ -7,6 +7,11 @@ struct point {
     int16_t y;
 };
 
+struct accel_point {
+    int16_t x;
+    float y_coef;
+};
+
 struct curve {
     struct point start, end, cp1, cp2;
 };
@@ -22,7 +27,7 @@ struct zip_accel_curve_data {
     const struct device *dev;
     bool initialized;
     struct curve* curves;
-    struct point* points;
+    struct accel_point* points;
     uint8_t num_curves;
     char* stored_datastring;
     float* remainders;  
