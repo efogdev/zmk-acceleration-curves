@@ -38,3 +38,7 @@ int data_import(const struct device* dev, const char* datastring);
 const struct device* device_by_name(const char* name);
 int dump_curves(const struct shell *, const char* name);
 int list_devices(char*** names);
+
+#if IS_ENABLED(CONFIG_ZMK_ACCEL_CURVE_MONITOR)
+void accel_curve_monitoring_set(bool enabled, bool abs);
+#endif

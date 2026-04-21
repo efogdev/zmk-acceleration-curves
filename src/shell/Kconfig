@@ -1,7 +1,17 @@
 if SHELL
 
 config ZMK_ACCEL_CURVE_SHELL
-bool "Acceleration curve shell commands"
-default y
+    bool "Acceleration curve shell commands"
+    default y
+
+config ZMK_ACCEL_CURVE_MONITOR
+    bool "Monitor mode"
+    depends on ZMK_ACCEL_CURVE_SHELL
+    default y
+
+config ZMK_ACCEL_CURVE_MONITOR_AUTO_OFF_MSEC
+    int "Auto-disable monitor after N ms of inactivity (0 = never)"
+    depends on ZMK_ACCEL_CURVE_MONITOR
+    default 30000
 
 endif

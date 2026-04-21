@@ -9,6 +9,16 @@
 #include <drivers/behavior_accel_curves_runtime.h>
 #include "zephyr/shell/shell.h"
 
+#if IS_ENABLED(CONFIG_ZMK_ACCEL_CURVE_MONITOR) && IS_ENABLED(CONFIG_ZMK_BLE_SHELL_DATA_CHANNEL)
+#include <zmk_ble_shell/data_channel.h>
+#endif
+
+#if IS_ENABLED(CONFIG_ZMK_RUNTIME_CONFIG)
+#include <zmk_runtime_config/runtime_config.h>
+#else
+#define ZRC_GET(key, default_val) (default_val)
+#endif
+
 #define DT_DRV_COMPAT zmk_accel_curve
 LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 
@@ -253,6 +263,68 @@ int data_import(const struct device* dev, const char* datastring) {
     return curve_count;
 }
 
+#if IS_ENABLED(CONFIG_ZMK_ACCEL_CURVE_MONITOR)
+static bool g_accel_monitor = false;
+static bool g_accel_monitor_abs = false;
+static int64_t g_accel_monitor_last_event_ms = 0;
+static uint8_t g_accel_monitor_count = 0;
+
+void accel_curve_monitoring_set(const bool enabled, const bool abs)
+{
+    g_accel_monitor = enabled;
+    if (enabled) {
+        g_accel_monitor_abs = abs;
+    }
+}
+
+static inline void accel_monitor(const uint16_t code, const int32_t raw_val)
+{
+    const int64_t now = k_uptime_get();
+    const int32_t auto_off_ms = ZRC_GET("accel/monitor_auto_off_ms", CONFIG_ZMK_ACCEL_CURVE_MONITOR_AUTO_OFF_MSEC);
+    if (auto_off_ms > 0 && g_accel_monitor
+        && g_accel_monitor_last_event_ms != 0
+        && now - g_accel_monitor_last_event_ms > auto_off_ms) {
+        g_accel_monitor = false;
+    }
+
+    if (!g_accel_monitor) {
+        return;
+    }
+
+    g_accel_monitor_last_event_ms = now;
+
+    const char *name;
+    if (code == INPUT_REL_X)          { name = "X"; }
+    else if (code == INPUT_REL_Y)     { name = "Y"; }
+    else if (code == INPUT_REL_WHEEL) { name = "SCROLL"; }
+    else if (code == INPUT_REL_HWHEEL){ name = "H_SCROLL"; }
+    else                              { name = "UNKNOWN"; }
+
+    const int32_t val = g_accel_monitor_abs ? abs(raw_val) : raw_val;
+    const bool emit_newline = (g_accel_monitor_count >= 3);
+
+    printf("(%s = %d) ", name, val);
+    if (emit_newline) {
+        printf("\n");
+        g_accel_monitor_count = 0;
+    } else {
+        g_accel_monitor_count++;
+    }
+
+#if IS_ENABLED(CONFIG_ZMK_BLE_SHELL_DATA_CHANNEL)
+    char buf[32];
+    const int n = snprintk(buf, sizeof(buf), "(%s = %d) ", name, val);
+    if (n > 0) {
+        zmk_ble_shell_data_write((const uint8_t *)buf, (size_t)n);
+    }
+    if (emit_newline) {
+        zmk_ble_shell_data_write((const uint8_t *)"\n", 1);
+    }
+#endif
+}
+
+#endif /* CONFIG_ZMK_ACCEL_CURVE_MONITOR */
+
 // ReSharper disable once CppParameterMayBeConstPtrOrRef
 static int sy_handle_event(const struct device *dev, struct input_event *event, const uint32_t p1,
                            const uint32_t p2, struct zmk_input_processor_state *s) {
@@ -302,6 +374,10 @@ static int sy_handle_event(const struct device *dev, struct input_event *event, 
             }
         }
     }
+
+#if IS_ENABLED(CONFIG_ZMK_ACCEL_CURVE_MONITOR)
+    accel_monitor(event->code, input_val);
+#endif
 
     const float result_with_remainder = (float) abs_input * coef + data->remainders[event_idx];
     const int32_t result_int = (int32_t) result_with_remainder;
@@ -407,3 +483,11 @@ static struct zmk_input_processor_driver_api sy_driver_api = { .handle_event = s
                           CONFIG_KERNEL_INIT_PRIORITY_DEFAULT, &sy_driver_api);
 
 DT_INST_FOREACH_STATUS_OKAY(ACCEL_CURVE_INST)
+
+#if IS_ENABLED(CONFIG_ZMK_ACCEL_CURVE_MONITOR) && IS_ENABLED(CONFIG_ZMK_RUNTIME_CONFIG)
+static int accel_curve_register_runtime_params(void) {
+    zrc_register("accel/monitor_auto_off_ms", CONFIG_ZMK_ACCEL_CURVE_MONITOR_AUTO_OFF_MSEC, 0, 3600000);
+    return 0;
+}
+SYS_INIT(accel_curve_register_runtime_params, POST_KERNEL, CONFIG_KERNEL_INIT_PRIORITY_DEVICE);
+#endif
