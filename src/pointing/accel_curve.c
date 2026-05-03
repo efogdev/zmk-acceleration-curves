@@ -269,11 +269,66 @@ static bool g_accel_monitor_abs = false;
 static int64_t g_accel_monitor_last_event_ms = 0;
 static uint8_t g_accel_monitor_count = 0;
 
+#define MONITOR_BUF_SIZE 256
+#define MONITOR_FLUSH_INTERVAL_MS 25
+
+static char g_monitor_buf[MONITOR_BUF_SIZE];
+static size_t g_monitor_buf_len;
+static struct k_spinlock g_monitor_buf_lock;
+static struct k_work_delayable g_monitor_flush_work;
+static bool g_monitor_work_initialized;
+
+static void monitor_flush_work_fn(struct k_work *w) {
+    ARG_UNUSED(w);
+
+    char local[MONITOR_BUF_SIZE + 1];
+    size_t len;
+
+    const k_spinlock_key_t key = k_spin_lock(&g_monitor_buf_lock);
+    len = g_monitor_buf_len;
+    if (len > 0) {
+        memcpy(local, g_monitor_buf, len);
+        g_monitor_buf_len = 0;
+    }
+    k_spin_unlock(&g_monitor_buf_lock, key);
+
+    if (len > 0) {
+        local[len] = '\0';
+        printf("%s", local);
+#if IS_ENABLED(CONFIG_ZMK_BLE_SHELL_DATA_CHANNEL)
+        zmk_ble_shell_data_write((const uint8_t *)local, len);
+#endif
+    }
+
+    if (g_accel_monitor) {
+        k_work_reschedule(&g_monitor_flush_work, K_MSEC(MONITOR_FLUSH_INTERVAL_MS));
+    }
+}
+
+static void monitor_init_work_once(void)
+{
+    if (!g_monitor_work_initialized) {
+        k_work_init_delayable(&g_monitor_flush_work, monitor_flush_work_fn);
+        g_monitor_work_initialized = true;
+    }
+}
+
 void accel_curve_monitoring_set(const bool enabled, const bool abs)
 {
+    monitor_init_work_once();
+
     g_accel_monitor = enabled;
     if (enabled) {
         g_accel_monitor_abs = abs;
+        k_work_reschedule(&g_monitor_flush_work, K_MSEC(MONITOR_FLUSH_INTERVAL_MS));
+    } else {
+        g_accel_monitor_last_event_ms = 0;
+        g_accel_monitor_count = 0;
+        k_work_cancel_delayable(&g_monitor_flush_work);
+
+        const k_spinlock_key_t key = k_spin_lock(&g_monitor_buf_lock);
+        g_monitor_buf_len = 0;
+        k_spin_unlock(&g_monitor_buf_lock, key);
     }
 }
 
@@ -298,29 +353,30 @@ static inline void accel_monitor(const uint16_t code, const int32_t raw_val)
     else if (code == INPUT_REL_Y)     { name = "Y"; }
     else if (code == INPUT_REL_WHEEL) { name = "SCROLL"; }
     else if (code == INPUT_REL_HWHEEL){ name = "H_SCROLL"; }
-    else                              { name = "UNKNOWN"; }
+    else                              { name = "?"; }
 
     const int32_t val = g_accel_monitor_abs ? abs(raw_val) : raw_val;
     const bool emit_newline = (g_accel_monitor_count >= 3);
-
-    printf("(%s = %d) ", name, val);
     if (emit_newline) {
-        printf("\n");
         g_accel_monitor_count = 0;
     } else {
         g_accel_monitor_count++;
     }
 
-#if IS_ENABLED(CONFIG_ZMK_BLE_SHELL_DATA_CHANNEL)
-    char buf[32];
-    const int n = snprintk(buf, sizeof(buf), "(%s = %d) ", name, val);
-    if (n > 0) {
-        zmk_ble_shell_data_write((const uint8_t *)buf, (size_t)n);
+    char tmp[64];
+    const int n = snprintk(tmp, sizeof(tmp), "(%s = %d) %s",
+                           name, val, emit_newline ? "\n" : "");
+    if (n <= 0) {
+        return;
     }
-    if (emit_newline) {
-        zmk_ble_shell_data_write((const uint8_t *)"\n", 1);
+
+    const k_spinlock_key_t key = k_spin_lock(&g_monitor_buf_lock);
+    const size_t avail = (size_t)MONITOR_BUF_SIZE - g_monitor_buf_len;
+    if ((size_t)n <= avail) {
+        memcpy(g_monitor_buf + g_monitor_buf_len, tmp, (size_t)n);
+        g_monitor_buf_len += (size_t)n;
     }
-#endif
+    k_spin_unlock(&g_monitor_buf_lock, key);
 }
 
 #endif /* CONFIG_ZMK_ACCEL_CURVE_MONITOR */

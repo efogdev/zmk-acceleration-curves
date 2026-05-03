@@ -38,6 +38,7 @@ static int cmd_status(const struct shell *sh, const size_t argc, char **argv) {
         }
     }
 
+    k_usleep(2000);
     return dump_curves(sh, argc == 1 ? NULL : argv[1]);
 }
 
