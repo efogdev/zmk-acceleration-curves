@@ -8,6 +8,7 @@
         points = <36>;
         device-name = "pointer";
         event-codes = <INPUT_REL_X INPUT_REL_Y>;
+        couple-axes;
     };
 
     zip_scroll_accel: zip_scroll_accel {

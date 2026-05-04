@@ -15,3 +15,6 @@ properties:
   event-codes:
     required: true
     type: array
+  couple-axes:
+    type: boolean
+    required: false

@@ -4,6 +4,7 @@
 #include <zephyr/kernel.h>
 #include <zephyr/device.h>
 #include <drivers/input_processor.h>
+#include <zephyr/input/input.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/settings/settings.h>
 #include <drivers/behavior_accel_curves_runtime.h>
@@ -238,6 +239,19 @@ int data_import(const struct device* dev, const char* datastring) {
         }
     }
 
+    if (config->couple_axes && !data->buffered_values) {
+        data->buffered_values = malloc(sizeof(int32_t) * config->event_codes_len);
+        data->buffered_present = malloc(sizeof(bool) * config->event_codes_len);
+        data->inject_pass = malloc(sizeof(bool) * config->event_codes_len);
+        if (data->buffered_values && data->buffered_present && data->inject_pass) {
+            for (uint8_t i = 0; i < config->event_codes_len; i++) {
+                data->buffered_values[i] = 0;
+                data->buffered_present[i] = false;
+                data->inject_pass[i] = false;
+            }
+        }
+    }
+
     if (!data->curves || !data->points) {
         LOG_ERR("Failed to allocate memory for curves or points");
         return -EINVAL;
@@ -381,6 +395,30 @@ static inline void accel_monitor(const uint16_t code, const int32_t raw_val)
 
 #endif /* CONFIG_ZMK_ACCEL_CURVE_MONITOR */
 
+static float sample_coef(const struct accel_point *points, const uint32_t num_points,
+                         const int64_t abs_input_mult_int, const float input_mult_smooth) {
+    if (abs_input_mult_int <= 100) {
+        return points[0].y_coef;
+    }
+    if (abs_input_mult_int >= points[num_points - 1].x) {
+        return points[num_points - 1].y_coef;
+    }
+    if (abs_input_mult_int <= points[0].x) {
+        return points[0].y_coef;
+    }
+    for (uint32_t i = 0; i < num_points - 1; i++) {
+        if (abs_input_mult_int >= points[i].x && abs_input_mult_int < points[i + 1].x) {
+            const struct accel_point *p0 = &points[i];
+            const struct accel_point *p1 = &points[i + 1];
+            const float t = (input_mult_smooth - (float)p0->x) / (float)(p1->x - p0->x);
+            return p0->y_coef + t * (p1->y_coef - p0->y_coef);
+        }
+    }
+    return 1.0f;
+}
+
+#define ACCEL_CURVE_MAX_COUPLED_AXES 8
+
 // ReSharper disable once CppParameterMayBeConstPtrOrRef
 static int sy_handle_event(const struct device *dev, struct input_event *event, const uint32_t p1,
                            const uint32_t p2, struct zmk_input_processor_state *s) {
@@ -405,39 +443,105 @@ static int sy_handle_event(const struct device *dev, struct input_event *event, 
         return 0;
     }
 
-    const int32_t input_val = event->value;
-    const int32_t abs_input = abs(input_val);
-    const int64_t abs_input_mult = (int64_t)abs_input * 100;
-    const int32_t sign = (input_val >= 0) ? 1 : -1;
-
     if (config->points == 0 || !data->points || !data->remainders) {
         return 0;
     }
 
-    float coef = 1.0f;
-    if (abs_input_mult >= data->points[config->points - 1].x) {
-        coef = data->points[config->points - 1].y_coef;
-    } else if (abs_input_mult <= data->points[0].x) {
-        coef = data->points[0].y_coef;
-    } else {
-        for (uint32_t i = 0; i < config->points - 1; i++) {
-            if (abs_input_mult >= data->points[i].x && abs_input_mult < data->points[i + 1].x) {
-                const struct accel_point *point0 = &data->points[i];
-                const struct accel_point *point1 = &data->points[i + 1];
-                const float t = (float)(abs_input_mult - point0->x) / (float)(point1->x - point0->x);
-                coef = point0->y_coef + t * (point1->y_coef - point0->y_coef);
+    if (config->couple_axes && config->event_codes_len <= ACCEL_CURVE_MAX_COUPLED_AXES) {
+        if (!data->buffered_values || !data->buffered_present || !data->inject_pass) {
+            return 0;
+        }
+
+        if (data->inject_pass[event_idx]) {
+            data->inject_pass[event_idx] = false;
+            return 0;
+        }
+
+        data->buffered_values[event_idx] = event->value;
+        data->buffered_present[event_idx] = true;
+
+#if IS_ENABLED(CONFIG_ZMK_ACCEL_CURVE_MONITOR)
+        accel_monitor(event->code, event->value);
+#endif
+
+        if (!event->sync) {
+            event->value = 0;
+            return 0;
+        }
+
+        float effective[ACCEL_CURVE_MAX_COUPLED_AXES] = {0};
+        float mag_sq = 0.0f;
+        for (uint8_t i = 0; i < config->event_codes_len; i++) {
+            if (!data->buffered_present[i]) continue;
+            const int32_t v = data->buffered_values[i];
+            const float av = (float)((v >= 0) ? v : -v);
+            effective[i] = av;
+            mag_sq += av * av;
+        }
+
+        if (mag_sq <= 0.0f) {
+            for (uint8_t i = 0; i < config->event_codes_len; i++) {
+                data->buffered_present[i] = false;
+            }
+            event->value = 0;
+            return 0;
+        }
+
+        const float magnitude = sqrtf(mag_sq);
+        const int64_t abs_input_mult = magnitude * 100.0f;
+        const float input_mult = magnitude * 100.0f;
+        const float coef = sample_coef(data->points, config->points, abs_input_mult, input_mult);
+
+        int8_t last_idx = -1;
+        for (int16_t i = (int16_t)config->event_codes_len - 1; i >= 0; i--) {
+            if (data->buffered_present[i]) {
+                last_idx = (int8_t)i;
                 break;
             }
         }
+
+        for (uint8_t i = 0; i < config->event_codes_len; i++) {
+            if (!data->buffered_present[i]) continue;
+            const int32_t v = data->buffered_values[i];
+            const int32_t scaleFactor = (v >= 0) ? 1 : -1;
+            const float result = effective[i] * coef + data->remainders[i];
+            const int32_t out_int = (int32_t) result;
+            data->remainders[i] = result - (float)out_int;
+            const int32_t scaled = out_int * scaleFactor;
+
+            data->inject_pass[i] = true;
+            input_report_rel(event->dev, config->event_codes[i], scaled,
+                             i == (uint8_t)last_idx, K_NO_WAIT);
+        }
+
+        for (uint8_t i = 0; i < config->event_codes_len; i++) {
+            data->buffered_present[i] = false;
+        }
+
+        event->value = 0;
+        event->sync = false;
+        return 0;
     }
+
+    const int32_t input_val = event->value;
+    if (input_val == 0) {
+        return 0;
+    }
+
+    const int32_t abs_input = abs(input_val);
+    const int64_t abs_input_mult = (int64_t)abs_input * 100;
+    const float input_mult = (float)abs_input * 100.0f;
+    const int32_t sign = (input_val >= 0) ? 1 : -1;
+
+    const float coef = sample_coef(data->points, config->points, abs_input_mult, input_mult);
 
 #if IS_ENABLED(CONFIG_ZMK_ACCEL_CURVE_MONITOR)
     accel_monitor(event->code, input_val);
 #endif
 
-    const float result_with_remainder = (float) abs_input * coef + data->remainders[event_idx];
-    const int32_t result_int = (int32_t) result_with_remainder;
-    data->remainders[event_idx] = result_with_remainder - (float) result_int;
+    const float result = (float)abs_input * coef + data->remainders[event_idx];
+    const int32_t result_int = (int32_t) result;
+    data->remainders[event_idx] = result - (float) result_int;
     event->value = result_int * sign;
     return 0;
 }
@@ -533,6 +637,7 @@ static struct zmk_input_processor_driver_api sy_driver_api = { .handle_event = s
         .points = DT_INST_PROP_OR(n, points, 64),                                                 \
         .device_name = DT_INST_PROP_OR(n, device_name, "unknown"),                                \
         .event_codes_len = DT_INST_PROP_LEN(n, event_codes),                                      \
+        .couple_axes = DT_INST_PROP_OR(n, couple_axes, false),                                    \
         .event_codes = DT_INST_PROP(n, event_codes)                                               \
     };                                                                                            \
     DEVICE_DT_INST_DEFINE(n, &sy_init, NULL, &data_##n, &config_##n, POST_KERNEL,                 \

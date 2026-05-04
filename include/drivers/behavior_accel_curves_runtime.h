@@ -19,6 +19,7 @@ struct curve {
 struct zip_accel_curve_config {
     const uint8_t max_curves, points;
     const uint8_t event_codes_len;
+    const bool couple_axes;
     const char* device_name;
     const uint16_t event_codes[];
 };
@@ -30,7 +31,10 @@ struct zip_accel_curve_data {
     struct accel_point* points;
     uint8_t num_curves;
     char* stored_datastring;
-    float* remainders;  
+    float* remainders;
+    int32_t* buffered_values;
+    bool* buffered_present;
+    bool* inject_pass;
 };
 
 void curves_init();
