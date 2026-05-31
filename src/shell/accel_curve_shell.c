@@ -24,14 +24,25 @@ static int cmd_status(const struct shell *sh, const size_t argc, char **argv) {
             shprint(sh, "No devices found.");
         } else {
             shprint(sh, "Devices available: ");
+            int rc = 0;
             for (size_t i = 0; i < available; i++) {
                 const struct device* dev = device_by_name(names[i]);
                 if (dev == NULL) {
                     shprint(sh, "Unexpected: device not found.");
-                    return -EBUSY;
+                    rc = -EBUSY;
+                    break;
                 }
                 const struct zip_accel_curve_config *config = dev->config;
                 shprint(sh, "  %s (up to %d curve(s), %d point(s) interpolation)", names[i], config->max_curves, config->points);
+            }
+
+            for (int i = 0; i < available; i++) {
+                free(names[i]);
+            }
+            free(names);
+
+            if (rc != 0) {
+                return rc;
             }
 
             shprint(sh, "");
@@ -55,7 +66,7 @@ static int cmd_destroy(const struct shell *sh, const size_t argc, char **argv) {
     }
 
     char buf[24];
-    sprintf(buf, "%s/%s", ACCEL_CURVE_NVS_PREFIX, argv[1]);
+    snprintf(buf, sizeof(buf), "%s/%s", ACCEL_CURVE_NVS_PREFIX, argv[1]);
     const int err = settings_delete(buf);
     if (err < 0) {
         shprint(sh, "Could not delete settings.");

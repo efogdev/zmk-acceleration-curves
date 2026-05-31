@@ -25,7 +25,6 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 
 static const struct device* devices[DT_NUM_INST_STATUS_OKAY(DT_DRV_COMPAT)];
 static uint8_t num_dev = 0;
-
 static struct k_work_delayable load_curves_work;
 static bool work_initialized = false;
 
@@ -105,11 +104,11 @@ static int set_curves(const struct device* dev, const char* datastring) {
             const float t = (float) i / (float) (num_points - 1);
             const int16_t x = bezier_eval(c->start.x, c->cp1.x, c->cp2.x, c->end.x, t);
             const int16_t y = bezier_eval(c->start.y, c->cp1.y, c->cp2.y, c->end.y, t);
-            
+
             if (x < 100) {
                 continue;
             }
-            
+
             data->points[point_idx].x = x;
             data->points[point_idx].y_coef = y / 100.0f;
             point_idx++;
@@ -129,7 +128,7 @@ static int set_curves(const struct device* dev, const char* datastring) {
 static int save_curves_to_nvs(const struct device* dev, const char* datastring) {
     const struct zip_accel_curve_config *config = dev->config;
 
-    char setting_name[64];
+    char setting_name[32];
     snprintf(setting_name, sizeof(setting_name), "%s/%s", ACCEL_CURVE_NVS_PREFIX, config->device_name);
 
     const int rc = settings_save_one(setting_name, datastring, strlen(datastring) + 1);
@@ -137,7 +136,7 @@ static int save_curves_to_nvs(const struct device* dev, const char* datastring) 
         LOG_ERR("Failed to save curves to NVS for %s: %d", config->device_name, rc);
         return rc;
     }
-    
+
     LOG_DBG("Saved curves to NVS for %s", config->device_name);
     return 0;
 }
@@ -157,13 +156,13 @@ static int load_cb(const char *key, const size_t len, const settings_read_cb rea
 static int load_curves_from_nvs(const struct device* dev) {
     const struct zip_accel_curve_config *config = dev->config;
     char setting_name[32];
-    sprintf(setting_name, "%s/%s", ACCEL_CURVE_NVS_PREFIX, config->device_name);
+    snprintf(setting_name, sizeof(setting_name), "%s/%s", ACCEL_CURVE_NVS_PREFIX, config->device_name);
     return settings_load_subtree_direct(setting_name, load_cb, (struct device*) dev);
 }
 
 static void load_curves_work_handler(struct k_work *work) {
     LOG_INF("Loading curves from NVS for all %d devices", num_dev);
-    
+
     for (uint8_t i = 0; i < num_dev; i++) {
         if (devices[i] != NULL) {
             load_curves_from_nvs(devices[i]);
@@ -173,29 +172,25 @@ static void load_curves_work_handler(struct k_work *work) {
 
 static int dump_cb(const char *key, const size_t len, const settings_read_cb read_cb, void *cb_arg, void *param) {
     char data[len];
-    const int read = read_cb(cb_arg, &data, len);
-    if (read == 0) {
+    const ssize_t read = read_cb(cb_arg, &data, len);
+    if (read <= 0) {
         LOG_ERR("Failed to read curve data for key: %s", key);
         return 0;
     }
-
-    char _data[read + 1];
-    sprintf(_data, "%s", data);
 
     if (param == NULL) {
         if (key != NULL) {
             LOG_INF("Device: %s", key);
         }
 
-        LOG_INF("Curve: %s", _data);
+        LOG_INF("Curve: %.*s", (int)read, data);
     } else {
         const struct shell *sh = param;
-
         if (key != NULL) {
             shell_print(sh, "Device: %s", key);
         }
 
-        shell_print(sh, "Curve: %s", _data);
+        shell_print(sh, "Curve: %.*s", (int)read, data);
     }
 
     return 0;
@@ -204,9 +199,9 @@ static int dump_cb(const char *key, const size_t len, const settings_read_cb rea
 int dump_curves(const struct shell *sh, const char* name) {
     char setting_name[32];
     if (name == NULL) {
-        sprintf(setting_name, "%s", ACCEL_CURVE_NVS_PREFIX);
+        snprintf(setting_name, sizeof(setting_name), "%s", ACCEL_CURVE_NVS_PREFIX);
     } else {
-        sprintf(setting_name, "%s/%s", ACCEL_CURVE_NVS_PREFIX, name);
+        snprintf(setting_name, sizeof(setting_name), "%s/%s", ACCEL_CURVE_NVS_PREFIX, name);
     }
 
     const int rc = settings_load_subtree_direct(setting_name, dump_cb, (struct shell *) sh);
@@ -227,9 +222,12 @@ int data_import(const struct device* dev, const char* datastring) {
     struct zip_accel_curve_data *data = dev->data;
     const struct zip_accel_curve_config *config = dev->config;
 
+    free(data->points);
+    data->points = NULL;
+
     data->curves = malloc(sizeof(struct curve) * config->max_curves);
     data->points = malloc(sizeof(struct accel_point) * config->points);
-    
+
     if (!data->remainders) {
         data->remainders = malloc(sizeof(float) * config->event_codes_len);
         if (data->remainders) {
@@ -254,6 +252,10 @@ int data_import(const struct device* dev, const char* datastring) {
 
     if (!data->curves || !data->points) {
         LOG_ERR("Failed to allocate memory for curves or points");
+        free(data->curves);
+        data->curves = NULL;
+        free(data->points);
+        data->points = NULL;
         return -EINVAL;
     }
 
@@ -263,17 +265,13 @@ int data_import(const struct device* dev, const char* datastring) {
     if (curve_count > 0) {
         data->initialized = true;
         data->num_curves = curve_count;
-        
-        if (data->stored_datastring) {
-            free(data->stored_datastring);
-        }
-        data->stored_datastring = strdup(datastring);
         save_curves_to_nvs(dev, datastring);
     } else {
         data->initialized = false;
     }
     
     free(data->curves);
+    data->curves = NULL;
     return curve_count;
 }
 
@@ -283,10 +281,7 @@ static bool g_accel_monitor_abs = false;
 static int64_t g_accel_monitor_last_event_ms = 0;
 static uint8_t g_accel_monitor_count = 0;
 
-#define MONITOR_BUF_SIZE 256
-#define MONITOR_FLUSH_INTERVAL_MS 25
-
-static char g_monitor_buf[MONITOR_BUF_SIZE];
+static char g_monitor_buf[CONFIG_ZMK_ACCEL_CURVE_MONITOR_BUF_SIZE];
 static size_t g_monitor_buf_len;
 static struct k_spinlock g_monitor_buf_lock;
 static struct k_work_delayable g_monitor_flush_work;
@@ -295,11 +290,10 @@ static bool g_monitor_work_initialized;
 static void monitor_flush_work_fn(struct k_work *w) {
     ARG_UNUSED(w);
 
-    char local[MONITOR_BUF_SIZE + 1];
     size_t len;
-
     const k_spinlock_key_t key = k_spin_lock(&g_monitor_buf_lock);
     len = g_monitor_buf_len;
+    char local[len + 1];
     if (len > 0) {
         memcpy(local, g_monitor_buf, len);
         g_monitor_buf_len = 0;
@@ -315,7 +309,7 @@ static void monitor_flush_work_fn(struct k_work *w) {
     }
 
     if (g_accel_monitor) {
-        k_work_reschedule(&g_monitor_flush_work, K_MSEC(MONITOR_FLUSH_INTERVAL_MS));
+        k_work_reschedule(&g_monitor_flush_work, K_MSEC(CONFIG_ZMK_ACCEL_CURVE_MONITOR_FLUSH_INTERVAL_MS));
     }
 }
 
@@ -334,7 +328,7 @@ void accel_curve_monitoring_set(const bool enabled, const bool abs)
     g_accel_monitor = enabled;
     if (enabled) {
         g_accel_monitor_abs = abs;
-        k_work_reschedule(&g_monitor_flush_work, K_MSEC(MONITOR_FLUSH_INTERVAL_MS));
+        k_work_reschedule(&g_monitor_flush_work, K_MSEC(CONFIG_ZMK_ACCEL_CURVE_MONITOR_FLUSH_INTERVAL_MS));
     } else {
         g_accel_monitor_last_event_ms = 0;
         g_accel_monitor_count = 0;
@@ -363,11 +357,11 @@ static inline void accel_monitor(const uint16_t code, const int32_t raw_val)
     g_accel_monitor_last_event_ms = now;
 
     const char *name;
-    if (code == INPUT_REL_X)          { name = "X"; }
-    else if (code == INPUT_REL_Y)     { name = "Y"; }
-    else if (code == INPUT_REL_WHEEL) { name = "SCROLL"; }
-    else if (code == INPUT_REL_HWHEEL){ name = "H_SCROLL"; }
-    else                              { name = "?"; }
+    if (code == INPUT_REL_X)           { name = "X"; }
+    else if (code == INPUT_REL_Y)      { name = "Y"; }
+    else if (code == INPUT_REL_WHEEL)  { name = "S"; }
+    else if (code == INPUT_REL_HWHEEL) { name = "HS"; }
+    else                               { name = "?"; }
 
     const int32_t val = g_accel_monitor_abs ? abs(raw_val) : raw_val;
     const bool emit_newline = (g_accel_monitor_count >= 3);
@@ -377,15 +371,14 @@ static inline void accel_monitor(const uint16_t code, const int32_t raw_val)
         g_accel_monitor_count++;
     }
 
-    char tmp[64];
-    const int n = snprintk(tmp, sizeof(tmp), "(%s = %d) %s",
-                           name, val, emit_newline ? "\n" : "");
+    char tmp[24];
+    const int n = snprintk(tmp, sizeof(tmp), "(%s = %d) %s", name, val, emit_newline ? "\n" : "");
     if (n <= 0) {
         return;
     }
 
     const k_spinlock_key_t key = k_spin_lock(&g_monitor_buf_lock);
-    const size_t avail = (size_t)MONITOR_BUF_SIZE - g_monitor_buf_len;
+    const size_t avail = (size_t)CONFIG_ZMK_ACCEL_CURVE_MONITOR_BUF_SIZE - g_monitor_buf_len;
     if ((size_t)n <= avail) {
         memcpy(g_monitor_buf + g_monitor_buf_len, tmp, (size_t)n);
         g_monitor_buf_len += (size_t)n;
@@ -417,8 +410,6 @@ static float sample_coef(const struct accel_point *points, const uint32_t num_po
     return 1.0f;
 }
 
-#define ACCEL_CURVE_MAX_COUPLED_AXES 8
-
 // ReSharper disable once CppParameterMayBeConstPtrOrRef
 static int sy_handle_event(const struct device *dev, struct input_event *event, const uint32_t p1,
                            const uint32_t p2, struct zmk_input_processor_state *s) {
@@ -447,7 +438,7 @@ static int sy_handle_event(const struct device *dev, struct input_event *event, 
         return 0;
     }
 
-    if (config->couple_axes && config->event_codes_len <= ACCEL_CURVE_MAX_COUPLED_AXES) {
+    if (config->couple_axes && config->event_codes_len <= 2) {
         if (!data->buffered_values || !data->buffered_present || !data->inject_pass) {
             return 0;
         }
@@ -469,7 +460,7 @@ static int sy_handle_event(const struct device *dev, struct input_event *event, 
             return 0;
         }
 
-        float effective[ACCEL_CURVE_MAX_COUPLED_AXES] = {0};
+        float effective[2] = {0};
         float mag_sq = 0.0f;
         for (uint8_t i = 0; i < config->event_codes_len; i++) {
             if (!data->buffered_present[i]) continue;

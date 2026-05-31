@@ -14,4 +14,14 @@ config ZMK_ACCEL_CURVE_MONITOR_AUTO_OFF_MSEC
     depends on ZMK_ACCEL_CURVE_MONITOR
     default 30000
 
+config ZMK_ACCEL_CURVE_MONITOR_BUF_SIZE
+    int "Monitor output buffer size in bytes"
+    depends on ZMK_ACCEL_CURVE_MONITOR
+    default 64
+
+config ZMK_ACCEL_CURVE_MONITOR_FLUSH_INTERVAL_MS
+    int "Monitor flush interval in milliseconds"
+    depends on ZMK_ACCEL_CURVE_MONITOR
+    default 10
+
 endif
