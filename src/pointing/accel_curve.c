@@ -23,6 +23,8 @@
 #define DT_DRV_COMPAT zmk_accel_curve
 LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 
+#define ACCEL_CURVE_DATA_MAX_LEN 1024
+
 static const struct device* devices[DT_NUM_INST_STATUS_OKAY(DT_DRV_COMPAT)];
 static uint8_t num_dev = 0;
 static struct k_work_delayable load_curves_work;
@@ -38,7 +40,7 @@ static int16_t bezier_eval(const int16_t p0, const int16_t p1, const int16_t p2,
 }
 
 static int set_curves(const struct device* dev, const char* datastring) {
-    const struct zip_accel_curve_data *data = dev->data;
+    struct zip_accel_curve_data *data = dev->data;
     const struct zip_accel_curve_config *config = dev->config;
 
     if (!datastring || !data->curves) {
@@ -122,6 +124,7 @@ static int set_curves(const struct device* dev, const char* datastring) {
         }
     }
 
+    data->num_points = (uint16_t)point_idx;
     return curve_count;
 }
 
@@ -143,6 +146,10 @@ static int save_curves_to_nvs(const struct device* dev, const char* datastring) 
 
 static int load_cb(const char *key, const size_t len, const settings_read_cb read_cb, void *cb_arg, void *param) {
     const struct device* dev = param;
+    if (len == 0 || len > ACCEL_CURVE_DATA_MAX_LEN) {
+        LOG_ERR("Invalid curve data length: %u", (unsigned)len);
+        return -EINVAL;
+    }
     char data[len];
     const int read = read_cb(cb_arg, &data, len);
     if (read == 0) {
@@ -171,6 +178,10 @@ static void load_curves_work_handler(struct k_work *work) {
 }
 
 static int dump_cb(const char *key, const size_t len, const settings_read_cb read_cb, void *cb_arg, void *param) {
+    if (len == 0 || len > ACCEL_CURVE_DATA_MAX_LEN) {
+        LOG_ERR("Skipping oversized curve entry: %u", (unsigned)len);
+        return 0;
+    }
     char data[len];
     const ssize_t read = read_cb(cb_arg, &data, len);
     if (read <= 0) {
@@ -434,7 +445,7 @@ static int sy_handle_event(const struct device *dev, struct input_event *event, 
         return 0;
     }
 
-    if (config->points == 0 || !data->points || !data->remainders) {
+    if (config->points == 0 || data->num_points == 0 || !data->points || !data->remainders) {
         return 0;
     }
 
@@ -481,7 +492,7 @@ static int sy_handle_event(const struct device *dev, struct input_event *event, 
         const float magnitude = sqrtf(mag_sq);
         const int64_t abs_input_mult = magnitude * 100.0f;
         const float input_mult = magnitude * 100.0f;
-        const float coef = sample_coef(data->points, config->points, abs_input_mult, input_mult);
+        const float coef = sample_coef(data->points, data->num_points, abs_input_mult, input_mult);
 
         int8_t last_idx = -1;
         for (int16_t i = (int16_t)config->event_codes_len - 1; i >= 0; i--) {
@@ -524,7 +535,7 @@ static int sy_handle_event(const struct device *dev, struct input_event *event, 
     const float input_mult = (float)abs_input * 100.0f;
     const int32_t sign = (input_val >= 0) ? 1 : -1;
 
-    const float coef = sample_coef(data->points, config->points, abs_input_mult, input_mult);
+    const float coef = sample_coef(data->points, data->num_points, abs_input_mult, input_mult);
 
 #if IS_ENABLED(CONFIG_ZMK_ACCEL_CURVE_MONITOR)
     accel_monitor(event->code, input_val);

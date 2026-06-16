@@ -30,6 +30,7 @@ struct zip_accel_curve_data {
     struct curve* curves;
     struct accel_point* points;
     uint8_t num_curves;
+    uint16_t num_points;
     float* remainders;
     int32_t* buffered_values;
     bool* buffered_present;
