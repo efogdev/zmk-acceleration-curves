@@ -5,4 +5,34 @@ config ZMK_ACCEL_CURVE
     default y
     depends on INPUT
 
+config ZMK_ACCEL_CURVE_DEAD_ZONE
+    bool "Enable dead zone"
+    depends on ZMK_ACCEL_CURVE
+    default n
+
+config ZMK_ACCEL_CURVE_DEAD_ZONE_BEFORE
+    bool "Apply dead zone before acceleration"
+    depends on ZMK_ACCEL_CURVE
+    default n
+
+config ZMK_ACCEL_CURVE_DEAD_ZONE_THRESHOLD
+    int "Dead zone threshold"
+    depends on ZMK_ACCEL_CURVE
+    default 1
+
+config ZMK_ACCEL_CURVE_DEAD_ZONE_COOLDOWN
+    int "Dead zone cooldown (ms)"
+    depends on ZMK_ACCEL_CURVE
+    default 0
+
+config ZMK_ACCEL_CURVE_ZRC_POLL_MS
+    int "ZRC cache refresh interval, msec"
+    depends on ZMK_ACCEL_CURVE
+    default 500
+
+config ZMK_ACCEL_CURVE_ZRC_REFRESH_YIELD_US
+    int "Yield between ZRC refresh reads, usec"
+    depends on ZMK_ACCEL_CURVE
+    default 10
+
 endif

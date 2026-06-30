@@ -25,6 +25,63 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 
 #define ACCEL_CURVE_DATA_MAX_LEN 1024
 
+#if IS_ENABLED(CONFIG_ZMK_RUNTIME_CONFIG)
+static uint32_t g_zrc_cache_last_refresh = 0;
+static bool     g_zrc_cache_initialized  = false;
+#endif
+
+static bool    g_zrc_dz_enable   = (bool)    IS_ENABLED(CONFIG_ZMK_ACCEL_CURVE_DEAD_ZONE);
+static bool    g_zrc_dz_before   = (bool)    IS_ENABLED(CONFIG_ZMK_ACCEL_CURVE_DEAD_ZONE_BEFORE);
+static int32_t g_zrc_dz_thres    = (int32_t) CONFIG_ZMK_ACCEL_CURVE_DEAD_ZONE_THRESHOLD;
+static int32_t g_zrc_dz_cooldown = (int32_t) CONFIG_ZMK_ACCEL_CURVE_DEAD_ZONE_COOLDOWN;
+#if IS_ENABLED(CONFIG_ZMK_ACCEL_CURVE_MONITOR)
+static int32_t g_zrc_monitor_auto_off_ms = (int32_t) CONFIG_ZMK_ACCEL_CURVE_MONITOR_AUTO_OFF_MSEC;
+#endif
+
+#if IS_ENABLED(CONFIG_ZMK_RUNTIME_CONFIG)
+#define ZRC_REFRESH_YIELD()                                          \
+    do {                                                             \
+        if (CONFIG_ZMK_ACCEL_CURVE_ZRC_REFRESH_YIELD_US > 0) {       \
+            k_usleep(CONFIG_ZMK_ACCEL_CURVE_ZRC_REFRESH_YIELD_US);   \
+        }                                                            \
+    } while (0)
+
+static const struct zrc_cache_entry {
+    const char *key;
+    void *dst;
+    uint8_t size;
+} zrc_cache_tbl[] = {
+    { .key = "accel/dz_enable",   .dst = &g_zrc_dz_enable,   .size = sizeof(g_zrc_dz_enable)   },
+    { .key = "accel/dz_before",   .dst = &g_zrc_dz_before,   .size = sizeof(g_zrc_dz_before)   },
+    { .key = "accel/dz_thres",    .dst = &g_zrc_dz_thres,    .size = sizeof(g_zrc_dz_thres)    },
+    { .key = "accel/dz_cooldown", .dst = &g_zrc_dz_cooldown, .size = sizeof(g_zrc_dz_cooldown) },
+#if IS_ENABLED(CONFIG_ZMK_ACCEL_CURVE_MONITOR)
+    { .key = "accel/monitor_auto_off_ms", .dst = &g_zrc_monitor_auto_off_ms, .size = sizeof(g_zrc_monitor_auto_off_ms) },
+#endif
+};
+
+static __attribute__((noinline)) void zrc_cache_refresh_if_due(const uint32_t now) {
+    if (likely(g_zrc_cache_initialized) &&
+        (now - g_zrc_cache_last_refresh) < CONFIG_ZMK_ACCEL_CURVE_ZRC_POLL_MS) {
+        return;
+    }
+
+    for (size_t i = 0; i < ARRAY_SIZE(zrc_cache_tbl); i++) {
+        const struct zrc_cache_entry *e = &zrc_cache_tbl[i];
+        const int32_t v = zrc_get(e->key);
+        memcpy(e->dst, &v, e->size);
+        if (i + 1 < ARRAY_SIZE(zrc_cache_tbl)) {
+            ZRC_REFRESH_YIELD();
+        }
+    }
+
+    g_zrc_cache_last_refresh = now;
+    g_zrc_cache_initialized  = true;
+}
+#else
+static inline void zrc_cache_refresh_if_due(const uint32_t now) { ARG_UNUSED(now); }
+#endif
+
 static const struct device* devices[DT_NUM_INST_STATUS_OKAY(DT_DRV_COMPAT)];
 static uint8_t num_dev = 0;
 static struct k_work_delayable load_curves_work;
@@ -59,17 +116,17 @@ static int set_curves(const struct device* dev, const char* datastring) {
 
         if (curve_count == 0) {
             data->curves[curve_count] = (struct curve){
-                .start = {0, 10},
-                .end = {values[2], values[3]},
-                .cp1 = {values[4], values[5]},
-                .cp2 = {values[6], values[7]}
+                .start = {.x = 0, .y = 10},
+                .end = {.x = values[2], .y = values[3]},
+                .cp1 = {.x = values[4], .y = values[5]},
+                .cp2 = {.x = values[6], .y = values[7]}
             };
         } else {
             data->curves[curve_count] = (struct curve){
-                .start = {values[0], values[1]},
-                .end = {values[2], values[3]},
-                .cp1 = {values[4], values[5]},
-                .cp2 = {values[6], values[7]}
+                .start = {.x = values[0], .y = values[1]},
+                .end = {.x = values[2], .y = values[3]},
+                .cp1 = {.x = values[4], .y = values[5]},
+                .cp2 = {.x = values[6], .y = values[7]}
             };
         }
 
@@ -354,7 +411,7 @@ void accel_curve_monitoring_set(const bool enabled, const bool abs)
 static inline void accel_monitor(const uint16_t code, const int32_t raw_val)
 {
     const int64_t now = k_uptime_get();
-    const int32_t auto_off_ms = ZRC_GET("accel/monitor_auto_off_ms", CONFIG_ZMK_ACCEL_CURVE_MONITOR_AUTO_OFF_MSEC);
+    const int32_t auto_off_ms = g_zrc_monitor_auto_off_ms;
     if (auto_off_ms > 0 && g_accel_monitor
         && g_accel_monitor_last_event_ms != 0
         && now - g_accel_monitor_last_event_ms > auto_off_ms) {
@@ -400,7 +457,7 @@ static inline void accel_monitor(const uint16_t code, const int32_t raw_val)
 #endif /* CONFIG_ZMK_ACCEL_CURVE_MONITOR */
 
 static float sample_coef(const struct accel_point *points, const uint32_t num_points,
-                         const int64_t abs_input_mult_int, const float input_mult_smooth) {
+                         const int32_t abs_input_mult_int, const float input_mult_smooth) {
     if (abs_input_mult_int <= 100) {
         return points[0].y_coef;
     }
@@ -421,10 +478,22 @@ static float sample_coef(const struct accel_point *points, const uint32_t num_po
     return 1.0f;
 }
 
+static inline bool accel_dz_zero(struct zip_accel_curve_data *data, const int32_t cooldown,
+                                 const int64_t now, const int32_t value, const int32_t thres) {
+    if (abs(value) > thres) {
+        data->dz_last_active_ms = now;
+        return false;
+    }
+    if (cooldown > 0 && now - data->dz_last_active_ms < cooldown) {
+        return false;
+    }
+    return true;
+}
+
 // ReSharper disable once CppParameterMayBeConstPtrOrRef
 static int sy_handle_event(const struct device *dev, struct input_event *event, const uint32_t p1,
                            const uint32_t p2, struct zmk_input_processor_state *s) {
-    const struct zip_accel_curve_data *data = dev->data;
+    struct zip_accel_curve_data *data = dev->data;
     const struct zip_accel_curve_config *config = dev->config;
 
     if (unlikely(!data->initialized)) {
@@ -449,6 +518,9 @@ static int sy_handle_event(const struct device *dev, struct input_event *event, 
         return 0;
     }
 
+    const int64_t dz_now = k_uptime_get();
+    zrc_cache_refresh_if_due((uint32_t) dz_now);
+
     if (config->couple_axes && config->event_codes_len <= 2) {
         if (!data->buffered_values || !data->buffered_present || !data->inject_pass) {
             return 0;
@@ -459,7 +531,11 @@ static int sy_handle_event(const struct device *dev, struct input_event *event, 
             return 0;
         }
 
-        data->buffered_values[event_idx] = event->value;
+        int32_t in_val = event->value;
+        if (g_zrc_dz_enable && g_zrc_dz_before && accel_dz_zero(data, g_zrc_dz_cooldown, dz_now, in_val, g_zrc_dz_thres)) {
+            in_val = 0;
+        }
+        data->buffered_values[event_idx] = in_val;
         data->buffered_present[event_idx] = true;
 
 #if IS_ENABLED(CONFIG_ZMK_ACCEL_CURVE_MONITOR)
@@ -490,7 +566,7 @@ static int sy_handle_event(const struct device *dev, struct input_event *event, 
         }
 
         const float magnitude = sqrtf(mag_sq);
-        const int64_t abs_input_mult = magnitude * 100.0f;
+        const int32_t abs_input_mult = magnitude * 100.0f;
         const float input_mult = magnitude * 100.0f;
         const float coef = sample_coef(data->points, data->num_points, abs_input_mult, input_mult);
 
@@ -509,7 +585,10 @@ static int sy_handle_event(const struct device *dev, struct input_event *event, 
             const float result = effective[i] * coef + data->remainders[i];
             const int32_t out_int = (int32_t) result;
             data->remainders[i] = result - (float)out_int;
-            const int32_t scaled = out_int * scaleFactor;
+            int32_t scaled = out_int * scaleFactor;
+            if (g_zrc_dz_enable && !g_zrc_dz_before && accel_dz_zero(data, g_zrc_dz_cooldown, dz_now, scaled, g_zrc_dz_thres)) {
+                scaled = 0;
+            }
 
             data->inject_pass[i] = true;
             input_report_rel(event->dev, config->event_codes[i], scaled,
@@ -531,7 +610,13 @@ static int sy_handle_event(const struct device *dev, struct input_event *event, 
     }
 
     const int32_t abs_input = abs(input_val);
-    const int64_t abs_input_mult = (int64_t)abs_input * 100;
+
+    if (g_zrc_dz_enable && g_zrc_dz_before && accel_dz_zero(data, g_zrc_dz_cooldown, dz_now, abs_input, g_zrc_dz_thres)) {
+        event->value = 0;
+        return 0;
+    }
+
+    const int32_t abs_input_mult = abs_input * 100;
     const float input_mult = (float)abs_input * 100.0f;
     const int32_t sign = (input_val >= 0) ? 1 : -1;
 
@@ -545,6 +630,9 @@ static int sy_handle_event(const struct device *dev, struct input_event *event, 
     const int32_t result_int = (int32_t) result;
     data->remainders[event_idx] = result - (float) result_int;
     event->value = result_int * sign;
+    if (g_zrc_dz_enable && !g_zrc_dz_before && accel_dz_zero(data, g_zrc_dz_cooldown, dz_now, result_int, g_zrc_dz_thres)) {
+        event->value = 0;
+    }
     return 0;
 }
 
@@ -647,9 +735,15 @@ static struct zmk_input_processor_driver_api sy_driver_api = { .handle_event = s
 
 DT_INST_FOREACH_STATUS_OKAY(ACCEL_CURVE_INST)
 
-#if IS_ENABLED(CONFIG_ZMK_ACCEL_CURVE_MONITOR) && IS_ENABLED(CONFIG_ZMK_RUNTIME_CONFIG)
+#if IS_ENABLED(CONFIG_ZMK_RUNTIME_CONFIG)
 static int accel_curve_register_runtime_params(void) {
+#if IS_ENABLED(CONFIG_ZMK_ACCEL_CURVE_MONITOR)
     zrc_register("accel/monitor_auto_off_ms", CONFIG_ZMK_ACCEL_CURVE_MONITOR_AUTO_OFF_MSEC, 0, 3600000);
+#endif
+    zrc_register("accel/dz_enable", IS_ENABLED(CONFIG_ZMK_ACCEL_CURVE_DEAD_ZONE), 0, 1);
+    zrc_register("accel/dz_before", IS_ENABLED(CONFIG_ZMK_ACCEL_CURVE_DEAD_ZONE_BEFORE), 0, 1);
+    zrc_register("accel/dz_thres", CONFIG_ZMK_ACCEL_CURVE_DEAD_ZONE_THRESHOLD, 0, 32767);
+    zrc_register("accel/dz_cooldown", CONFIG_ZMK_ACCEL_CURVE_DEAD_ZONE_COOLDOWN, 0, 60000);
     return 0;
 }
 SYS_INIT(accel_curve_register_runtime_params, POST_KERNEL, CONFIG_KERNEL_INIT_PRIORITY_DEVICE);
