@@ -96,6 +96,21 @@ static int16_t bezier_eval(const int16_t p0, const int16_t p1, const int16_t p2,
     return (int16_t) (uuu * p0 + 3 * uu * t * p1 + 3 * u * tt * p2 + ttt * p3);
 }
 
+static bool parse_i16_seq(const char **pp, int16_t *out, const uint8_t n) {
+    const char *p = *pp;
+    for (uint8_t i = 0; i < n; i++) {
+        char *end;
+        const long v = strtol(p, &end, 10);
+        if (end == p) {
+            return false;
+        }
+        out[i] = (int16_t) v;
+        p = end;
+    }
+    *pp = p;
+    return true;
+}
+
 static int set_curves(const struct device* dev, const char* datastring) {
     struct zip_accel_curve_data *data = dev->data;
     const struct zip_accel_curve_config *config = dev->config;
@@ -108,11 +123,7 @@ static int set_curves(const struct device* dev, const char* datastring) {
     const char* ptr = datastring;
     int16_t values[8];
     while (*ptr && curve_count < config->max_curves) {
-        const int parsed = sscanf(ptr, "%hd %hd %hd %hd %hd %hd %hd %hd",
-            &values[0], &values[1], &values[2], &values[3],
-            &values[4], &values[5], &values[6], &values[7]);
-
-        if (parsed != 8) break;
+        if (!parse_i16_seq(&ptr, values, 8)) break;
 
         if (curve_count == 0) {
             data->curves[curve_count] = (struct curve){
@@ -131,11 +142,6 @@ static int set_curves(const struct device* dev, const char* datastring) {
         }
 
         curve_count++;
-
-        for (int i = 0; i < 8 && *ptr; i++) {
-            while (*ptr && (*ptr == ' ' || *ptr == '\t')) ptr++;
-            while (*ptr && *ptr != ' ' && *ptr != '\t') ptr++;
-        }
     }
 
     if (curve_count < 1 || curve_count > config->max_curves) {
