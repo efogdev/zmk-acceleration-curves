@@ -25,14 +25,4 @@ config ZMK_ACCEL_CURVE_DEAD_ZONE_COOLDOWN
     depends on ZMK_ACCEL_CURVE
     default 0
 
-config ZMK_ACCEL_CURVE_ZRC_POLL_MS
-    int "ZRC cache refresh interval, msec"
-    depends on ZMK_ACCEL_CURVE
-    default 500
-
-config ZMK_ACCEL_CURVE_ZRC_REFRESH_YIELD_US
-    int "Yield between ZRC refresh reads, usec"
-    depends on ZMK_ACCEL_CURVE
-    default 10
-
 endif

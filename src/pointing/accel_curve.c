@@ -25,11 +25,6 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 
 #define ACCEL_CURVE_DATA_MAX_LEN 1024
 
-#if IS_ENABLED(CONFIG_ZMK_RUNTIME_CONFIG)
-static uint32_t g_zrc_cache_last_refresh = 0;
-static bool     g_zrc_cache_initialized  = false;
-#endif
-
 static bool    g_zrc_dz_enable   = (bool)    IS_ENABLED(CONFIG_ZMK_ACCEL_CURVE_DEAD_ZONE);
 static bool    g_zrc_dz_before   = (bool)    IS_ENABLED(CONFIG_ZMK_ACCEL_CURVE_DEAD_ZONE_BEFORE);
 static int32_t g_zrc_dz_thres    = (int32_t) CONFIG_ZMK_ACCEL_CURVE_DEAD_ZONE_THRESHOLD;
@@ -39,18 +34,7 @@ static int32_t g_zrc_monitor_auto_off_ms = (int32_t) CONFIG_ZMK_ACCEL_CURVE_MONI
 #endif
 
 #if IS_ENABLED(CONFIG_ZMK_RUNTIME_CONFIG)
-#define ZRC_REFRESH_YIELD()                                          \
-    do {                                                             \
-        if (CONFIG_ZMK_ACCEL_CURVE_ZRC_REFRESH_YIELD_US > 0) {       \
-            k_usleep(CONFIG_ZMK_ACCEL_CURVE_ZRC_REFRESH_YIELD_US);   \
-        }                                                            \
-    } while (0)
-
-static const struct zrc_cache_entry {
-    const char *key;
-    void *dst;
-    uint8_t size;
-} zrc_cache_tbl[] = {
+static const struct zrc_cache_entry zrc_cache_tbl[] = {
     { .key = "accel/dz_enable",   .dst = &g_zrc_dz_enable,   .size = sizeof(g_zrc_dz_enable)   },
     { .key = "accel/dz_before",   .dst = &g_zrc_dz_before,   .size = sizeof(g_zrc_dz_before)   },
     { .key = "accel/dz_thres",    .dst = &g_zrc_dz_thres,    .size = sizeof(g_zrc_dz_thres)    },
@@ -59,27 +43,6 @@ static const struct zrc_cache_entry {
     { .key = "accel/monitor_auto_off_ms", .dst = &g_zrc_monitor_auto_off_ms, .size = sizeof(g_zrc_monitor_auto_off_ms) },
 #endif
 };
-
-static __attribute__((noinline)) void zrc_cache_refresh_if_due(const uint32_t now) {
-    if (likely(g_zrc_cache_initialized) &&
-        (now - g_zrc_cache_last_refresh) < CONFIG_ZMK_ACCEL_CURVE_ZRC_POLL_MS) {
-        return;
-    }
-
-    for (size_t i = 0; i < ARRAY_SIZE(zrc_cache_tbl); i++) {
-        const struct zrc_cache_entry *e = &zrc_cache_tbl[i];
-        const int32_t v = zrc_get(e->key);
-        memcpy(e->dst, &v, e->size);
-        if (i + 1 < ARRAY_SIZE(zrc_cache_tbl)) {
-            ZRC_REFRESH_YIELD();
-        }
-    }
-
-    g_zrc_cache_last_refresh = now;
-    g_zrc_cache_initialized  = true;
-}
-#else
-static inline void zrc_cache_refresh_if_due(const uint32_t now) { ARG_UNUSED(now); }
 #endif
 
 static const struct device* devices[DT_NUM_INST_STATUS_OKAY(DT_DRV_COMPAT)];
@@ -185,6 +148,17 @@ static int set_curves(const struct device* dev, const char* datastring) {
             LOG_ERR("Invalid point sequence: X values must be strictly increasing at index %d/%d", i, point_idx);
             return -EINVAL;
         }
+    }
+
+    for (uint32_t i = 0; i + 1 < point_idx; i++) {
+        const int16_t dx = data->points[i + 1].x - data->points[i].x;
+        data->points[i].slope = dx > 0
+            ? (data->points[i + 1].y_coef - data->points[i].y_coef) / (float) dx
+            : 0.0f;
+    }
+
+    if (point_idx > 0) {
+        data->points[point_idx - 1].slope = 0.0f;
     }
 
     data->num_points = (uint16_t)point_idx;
@@ -308,6 +282,16 @@ int data_import(const struct device* dev, const char* datastring) {
             for (uint8_t i = 0; i < config->event_codes_len; i++) {
                 data->remainders[i] = 0.0f;
             }
+        }
+    }
+
+    if (!data->sample_cache) {
+        data->sample_cache = malloc(sizeof(struct accel_sample_cache) * config->event_codes_len);
+    }
+
+    if (data->sample_cache) {
+        for (uint8_t i = 0; i < config->event_codes_len; i++) {
+            data->sample_cache[i] = (struct accel_sample_cache){ .last_idx = 0, .last_input = 0 };
         }
     }
 
@@ -462,30 +446,75 @@ static inline void accel_monitor(const uint16_t code, const int32_t raw_val)
 
 #endif /* CONFIG_ZMK_ACCEL_CURVE_MONITOR */
 
+static inline bool seg_contains(const struct accel_point *points, const uint16_t i, const uint32_t abs_input) {
+    return abs_input >= points[i].x && abs_input < points[i + 1].x;
+}
+
+static inline float seg_lerp(const struct accel_point *points, const uint16_t i, const float abs_input_mult) {
+    return points[i].y_coef + (abs_input_mult - (float) points[i].x) * points[i].slope;
+}
+
 static float sample_coef(const struct accel_point *points, const uint32_t num_points,
-                         const int32_t abs_input_mult_int, const float input_mult_smooth) {
-    if (abs_input_mult_int <= 100) {
+                         const uint32_t abs_input, const float abs_input_mult,
+                         struct accel_sample_cache *cache)
+{
+    const uint32_t prev_input = cache->last_input;
+    cache->last_input = abs_input;
+
+    if (abs_input <= 100) {
+        cache->last_idx = 0;
         return points[0].y_coef;
     }
-    if (abs_input_mult_int >= points[num_points - 1].x) {
+    if (abs_input >= points[num_points - 1].x) {
+        cache->last_idx = (uint16_t) (num_points >= 2 ? num_points - 2 : 0);
         return points[num_points - 1].y_coef;
     }
-    if (abs_input_mult_int <= points[0].x) {
+    if (unlikely(abs_input <= points[0].x)) {
+        cache->last_idx = 0;
         return points[0].y_coef;
     }
-    for (uint32_t i = 0; i < num_points - 1; i++) {
-        if (abs_input_mult_int >= points[i].x && abs_input_mult_int < points[i + 1].x) {
-            const struct accel_point *p0 = &points[i];
-            const struct accel_point *p1 = &points[i + 1];
-            const float t = (input_mult_smooth - (float)p0->x) / (float)(p1->x - p0->x);
-            return p0->y_coef + t * (p1->y_coef - p0->y_coef);
+
+    const uint16_t last_seg = (uint16_t) (num_points - 2);
+    const uint16_t start = cache->last_idx <= last_seg ? cache->last_idx : 0;
+    if (seg_contains(points, start, abs_input)) {
+        cache->last_idx = start;
+        return seg_lerp(points, start, abs_input_mult);
+    }
+
+    const bool up = abs_input >= prev_input;
+    if (up) {
+        for (uint16_t i = start + 1; i <= last_seg; i++) {
+            if (seg_contains(points, i, abs_input)) {
+                cache->last_idx = i;
+                return seg_lerp(points, i, abs_input_mult);
+            }
+        }
+        for (uint16_t i = 0; i < start; i++) {
+            if (seg_contains(points, i, abs_input)) {
+                cache->last_idx = i;
+                return seg_lerp(points, i, abs_input_mult);
+            }
+        }
+    } else {
+        for (uint16_t i = start; i > 0; i--) {
+            if (seg_contains(points, i - 1, abs_input)) {
+                cache->last_idx = i - 1;
+                return seg_lerp(points, i - 1, abs_input_mult);
+            }
+        }
+        for (uint16_t i = start + 1; i <= last_seg; i++) {
+            if (seg_contains(points, i, abs_input)) {
+                cache->last_idx = i;
+                return seg_lerp(points, i, abs_input_mult);
+            }
         }
     }
+
     return 1.0f;
 }
 
-static inline bool accel_dz_zero(struct zip_accel_curve_data *data, const int32_t cooldown,
-                                 const int64_t now, const int32_t value, const int32_t thres) {
+static inline bool accel_dz_zero(struct zip_accel_curve_data *data, const int32_t cooldown, const int32_t value, const int32_t thres) {
+    const int64_t now = k_uptime_get();
     if (abs(value) > thres) {
         data->dz_last_active_ms = now;
         return false;
@@ -520,12 +549,9 @@ static int sy_handle_event(const struct device *dev, struct input_event *event, 
         return 0;
     }
 
-    if (config->points == 0 || data->num_points == 0 || !data->points || !data->remainders) {
+    if (config->points == 0 || data->num_points == 0 || !data->points || !data->remainders || !data->sample_cache) {
         return 0;
     }
-
-    const int64_t dz_now = k_uptime_get();
-    zrc_cache_refresh_if_due((uint32_t) dz_now);
 
     if (config->couple_axes && config->event_codes_len <= 2) {
         if (!data->buffered_values || !data->buffered_present || !data->inject_pass) {
@@ -538,7 +564,7 @@ static int sy_handle_event(const struct device *dev, struct input_event *event, 
         }
 
         int32_t in_val = event->value;
-        if (g_zrc_dz_enable && g_zrc_dz_before && accel_dz_zero(data, g_zrc_dz_cooldown, dz_now, in_val, g_zrc_dz_thres)) {
+        if (g_zrc_dz_enable && g_zrc_dz_before && accel_dz_zero(data, g_zrc_dz_cooldown, in_val, g_zrc_dz_thres)) {
             in_val = 0;
         }
         data->buffered_values[event_idx] = in_val;
@@ -572,9 +598,8 @@ static int sy_handle_event(const struct device *dev, struct input_event *event, 
         }
 
         const float magnitude = sqrtf(mag_sq);
-        const int32_t abs_input_mult = magnitude * 100.0f;
         const float input_mult = magnitude * 100.0f;
-        const float coef = sample_coef(data->points, data->num_points, abs_input_mult, input_mult);
+        const float coef = sample_coef(data->points, data->num_points, (uint32_t) input_mult, input_mult, &data->sample_cache[0]);
 
         int8_t last_idx = -1;
         for (int16_t i = (int16_t)config->event_codes_len - 1; i >= 0; i--) {
@@ -587,18 +612,16 @@ static int sy_handle_event(const struct device *dev, struct input_event *event, 
         for (uint8_t i = 0; i < config->event_codes_len; i++) {
             if (!data->buffered_present[i]) continue;
             const int32_t v = data->buffered_values[i];
-            const int32_t scaleFactor = (v >= 0) ? 1 : -1;
             const float result = effective[i] * coef + data->remainders[i];
             const int32_t out_int = (int32_t) result;
             data->remainders[i] = result - (float)out_int;
-            int32_t scaled = out_int * scaleFactor;
-            if (g_zrc_dz_enable && !g_zrc_dz_before && accel_dz_zero(data, g_zrc_dz_cooldown, dz_now, scaled, g_zrc_dz_thres)) {
+            int32_t scaled = out_int * ((v >= 0) ? 1 : -1);
+            if (g_zrc_dz_enable && !g_zrc_dz_before && accel_dz_zero(data, g_zrc_dz_cooldown, scaled, g_zrc_dz_thres)) {
                 scaled = 0;
             }
 
             data->inject_pass[i] = true;
-            input_report_rel(event->dev, config->event_codes[i], scaled,
-                             i == (uint8_t)last_idx, K_NO_WAIT);
+            input_report_rel(event->dev, config->event_codes[i], scaled, i == (uint8_t)last_idx, K_NO_WAIT);
         }
 
         for (uint8_t i = 0; i < config->event_codes_len; i++) {
@@ -616,17 +639,14 @@ static int sy_handle_event(const struct device *dev, struct input_event *event, 
     }
 
     const int32_t abs_input = abs(input_val);
-
-    if (g_zrc_dz_enable && g_zrc_dz_before && accel_dz_zero(data, g_zrc_dz_cooldown, dz_now, abs_input, g_zrc_dz_thres)) {
+    if (g_zrc_dz_enable && g_zrc_dz_before && accel_dz_zero(data, g_zrc_dz_cooldown, abs_input, g_zrc_dz_thres)) {
         event->value = 0;
         return 0;
     }
 
-    const int32_t abs_input_mult = abs_input * 100;
     const float input_mult = (float)abs_input * 100.0f;
     const int32_t sign = (input_val >= 0) ? 1 : -1;
-
-    const float coef = sample_coef(data->points, data->num_points, abs_input_mult, input_mult);
+    const float coef = sample_coef(data->points, data->num_points, (uint32_t) input_mult, input_mult, &data->sample_cache[event_idx]);
 
 #if IS_ENABLED(CONFIG_ZMK_ACCEL_CURVE_MONITOR)
     accel_monitor(event->code, input_val);
@@ -636,7 +656,7 @@ static int sy_handle_event(const struct device *dev, struct input_event *event, 
     const int32_t result_int = (int32_t) result;
     data->remainders[event_idx] = result - (float) result_int;
     event->value = result_int * sign;
-    if (g_zrc_dz_enable && !g_zrc_dz_before && accel_dz_zero(data, g_zrc_dz_cooldown, dz_now, result_int, g_zrc_dz_thres)) {
+    if (g_zrc_dz_enable && !g_zrc_dz_before && accel_dz_zero(data, g_zrc_dz_cooldown, result_int, g_zrc_dz_thres)) {
         event->value = 0;
     }
     return 0;
@@ -667,7 +687,7 @@ static int sy_init(const struct device *dev) {
         num_dev++;
     } else {
         LOG_ERR("Too many devices");
-        return -EINVAL;
+        return -ENOMEM;
     }
     
     if (!work_initialized) {
@@ -729,8 +749,8 @@ static struct zmk_input_processor_driver_api sy_driver_api = { .handle_event = s
 #define ACCEL_CURVE_INST(n)                                                                       \
     static struct zip_accel_curve_data data_##n = { 0 };                                          \
     static const struct zip_accel_curve_config config_##n = {                                     \
-        .max_curves = DT_INST_PROP_OR(n, max_curves, 8),                                          \
-        .points = DT_INST_PROP_OR(n, points, 64),                                                 \
+        .max_curves = DT_INST_PROP_OR(n, max_curves, 4),                                          \
+        .points = DT_INST_PROP_OR(n, points, 32),                                                 \
         .device_name = DT_INST_PROP_OR(n, device_name, "unknown"),                                \
         .event_codes_len = DT_INST_PROP_LEN(n, event_codes),                                      \
         .couple_axes = DT_INST_PROP_OR(n, couple_axes, false),                                    \
@@ -750,6 +770,7 @@ static int accel_curve_register_runtime_params(void) {
     zrc_register("accel/dz_before", IS_ENABLED(CONFIG_ZMK_ACCEL_CURVE_DEAD_ZONE_BEFORE), 0, 1);
     zrc_register("accel/dz_thres", CONFIG_ZMK_ACCEL_CURVE_DEAD_ZONE_THRESHOLD, 0, 32767);
     zrc_register("accel/dz_cooldown", CONFIG_ZMK_ACCEL_CURVE_DEAD_ZONE_COOLDOWN, 0, 60000);
+    zrc_cache_register(zrc_cache_tbl, ARRAY_SIZE(zrc_cache_tbl));
     return 0;
 }
 SYS_INIT(accel_curve_register_runtime_params, POST_KERNEL, CONFIG_KERNEL_INIT_PRIORITY_DEVICE);

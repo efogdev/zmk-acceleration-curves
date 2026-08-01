@@ -10,6 +10,12 @@ struct point {
 struct accel_point {
     int16_t x;
     float y_coef;
+    float slope;
+};
+
+struct accel_sample_cache {
+    uint16_t last_idx;
+    uint32_t last_input;
 };
 
 struct curve {
@@ -32,6 +38,7 @@ struct zip_accel_curve_data {
     uint8_t num_curves;
     uint16_t num_points;
     float* remainders;
+    struct accel_sample_cache* sample_cache;
     int64_t dz_last_active_ms;
     int32_t* buffered_values;
     bool* buffered_present;
