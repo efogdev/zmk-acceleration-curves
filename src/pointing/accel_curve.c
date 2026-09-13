@@ -212,6 +212,14 @@ static void load_curves_work_handler(struct k_work *work) {
     }
 }
 
+static int accel_curve_load_cb(const char *name, const size_t len, const settings_read_cb read_cb, void *cb_arg) {
+    k_work_cancel_delayable(&load_curves_work);
+    k_work_reschedule(&load_curves_work, K_MSEC(5));
+    return 0;
+}
+
+SETTINGS_STATIC_HANDLER_DEFINE(accel_curve_lcb, ACCEL_CURVE_NVS_PREFIX, NULL, accel_curve_load_cb, NULL, NULL);
+
 static int dump_cb(const char *key, const size_t len, const settings_read_cb read_cb, void *cb_arg, void *param) {
     if (len == 0 || len > ACCEL_CURVE_DATA_MAX_LEN) {
         LOG_ERR("Skipping oversized curve entry: %u", (unsigned)len);
@@ -319,9 +327,13 @@ int data_import(const struct device* dev, const char* datastring) {
     LOG_INF("%d curves found", curve_count);
 
     if (curve_count > 0) {
-        data->initialized = true;
+        if (data->initialized == true) {
+            save_curves_to_nvs(dev, datastring);
+        } else {
+            data->initialized = true;
+        }
+
         data->num_curves = curve_count;
-        save_curves_to_nvs(dev, datastring);
     } else {
         data->initialized = false;
     }
@@ -692,9 +704,7 @@ static int sy_init(const struct device *dev) {
         k_work_init_delayable(&load_curves_work, load_curves_work_handler);
         work_initialized = true;
     }
-    
-    k_work_cancel_delayable(&load_curves_work);
-    k_work_reschedule(&load_curves_work, K_MSEC(5));
+
     return 0;
 }
 
