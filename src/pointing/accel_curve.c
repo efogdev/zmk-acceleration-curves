@@ -91,16 +91,16 @@ static int set_curves(const struct device* dev, const char* datastring) {
         if (curve_count == 0) {
             data->curves[curve_count] = (struct curve){
                 .start = {.x = 0, .y = 10},
-                .end = {.x = values[2], .y = values[3]},
-                .cp1 = {.x = values[4], .y = values[5]},
-                .cp2 = {.x = values[6], .y = values[7]}
+                .end   = {.x = values[2], .y = values[3]},
+                .cp1   = {.x = values[4], .y = values[5]},
+                .cp2   = {.x = values[6], .y = values[7]}
             };
         } else {
             data->curves[curve_count] = (struct curve){
                 .start = {.x = values[0], .y = values[1]},
-                .end = {.x = values[2], .y = values[3]},
-                .cp1 = {.x = values[4], .y = values[5]},
-                .cp2 = {.x = values[6], .y = values[7]}
+                .end   = {.x = values[2], .y = values[3]},
+                .cp1   = {.x = values[4], .y = values[5]},
+                .cp2   = {.x = values[6], .y = values[7]}
             };
         }
 
@@ -205,8 +205,6 @@ static int load_curves_from_nvs(const struct device* dev) {
 }
 
 static void load_curves_work_handler(struct k_work *work) {
-    LOG_INF("Loading curves from NVS for all %d devices", num_dev);
-
     for (uint8_t i = 0; i < num_dev; i++) {
         if (devices[i] != NULL) {
             load_curves_from_nvs(devices[i]);
@@ -696,7 +694,7 @@ static int sy_init(const struct device *dev) {
     }
     
     k_work_cancel_delayable(&load_curves_work);
-    k_work_reschedule(&load_curves_work, K_MSEC(1350));
+    k_work_reschedule(&load_curves_work, K_MSEC(5));
     return 0;
 }
 
